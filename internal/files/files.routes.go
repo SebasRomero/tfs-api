@@ -2,17 +2,29 @@ package files
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"os"
 	fp "path/filepath"
+	"strings"
+	"time"
+
+	aws3 "github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/google/uuid"
+	"github.com/sebasromero/tfs-api/internal/aws"
 )
+
+var awsClient = aws.InitAWS()
 
 func Push(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Push")
-
+	folderName := generateRandomID()
+	bucketName := os.Getenv("AWS_BUCKET_NAME")
 	err := r.ParseMultipartForm(10 << 20) // Limit the size to 10 MB
 	if err != nil {
 		http.Error(w, "unable to parse form", http.StatusBadRequest)
@@ -33,18 +45,41 @@ func Push(w http.ResponseWriter, r *http.Request) {
 		}
 		defer file.Close()
 
-		out, err := os.Create(fmt.Sprintf("./uploads/%s", fileHeader.Filename))
-		if err != nil {
-			http.Error(w, "unable to save file", http.StatusInternalServerError)
-			return
-		}
-		defer out.Close()
+		_, err = awsClient.PutObject(context.TODO(), &s3.PutObjectInput{
+			Bucket: aws3.String(bucketName),
+			Body:   file,
+			Key:    aws3.String(fmt.Sprintf("%s/%s", folderName, fileHeader.Filename))})
 
-		_, err = io.Copy(out, file)
 		if err != nil {
-			http.Error(w, "unable to save file", http.StatusInternalServerError)
-			return
+			log.Fatal(err)
 		}
+		go func() {
+			time.Sleep(5 * time.Minute)
+
+			output, err := awsClient.ListObjectsV2(context.TODO(), &s3.ListObjectsV2Input{
+				Bucket: &bucketName,
+				Prefix: aws3.String(folderName + "/"),
+			})
+			if err != nil {
+				log.Printf("error listing objects in folder %s: %v", folderName, err)
+				return
+			}
+
+			for _, object := range output.Contents {
+				awsClient.DeleteObject(context.TODO(), &s3.DeleteObjectInput{
+					Bucket: &bucketName,
+					Key:    object.Key,
+				})
+			}
+
+			_, err = awsClient.DeleteObject(context.TODO(), &s3.DeleteObjectInput{
+				Bucket: &bucketName,
+				Key:    aws3.String(folderName + "/"),
+			})
+			if err != nil {
+				log.Printf("error deleting folder %s: %v", folderName, err)
+			}
+		}()
 		fmt.Fprintf(w, "file %s uploaded successfully\n", fileHeader.Filename)
 	}
 
@@ -90,4 +125,10 @@ func Pull(w http.ResponseWriter, r *http.Request) {
 	writer.Close()
 	w.Header().Set("Content-Type", writer.FormDataContentType())
 	w.Write(body.Bytes())
+}
+
+func generateRandomID() string {
+	id := strings.ToLower(uuid.New().String())
+
+	return strings.Split(id, "-")[0]
 }
