@@ -9,7 +9,6 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
-	fp "path/filepath"
 	"strings"
 	"time"
 
@@ -22,7 +21,6 @@ import (
 var awsClient = aws.InitAWS()
 
 func Push(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("Push")
 	folderName := generateRandomID()
 	bucketName := os.Getenv("AWS_BUCKET_NAME")
 	err := r.ParseMultipartForm(10 << 20) // Limit the size to 10 MB
@@ -53,6 +51,7 @@ func Push(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Fatal(err)
 		}
+		link := "http://localhost:8080/pull/" + folderName
 		go func() {
 			time.Sleep(5 * time.Minute)
 
@@ -80,42 +79,45 @@ func Push(w http.ResponseWriter, r *http.Request) {
 				log.Printf("error deleting folder %s: %v", folderName, err)
 			}
 		}()
-		fmt.Fprintf(w, "file %s uploaded successfully\n", fileHeader.Filename)
+		fmt.Fprintf(w, "files uploaded successfully: get them with this link: %s\n", link)
 	}
 
 }
 
 func Pull(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("pull")
-
-	dir := "../uploads"
+	directoryId := r.PathValue("id")
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
+	bucketName := os.Getenv("AWS_BUCKET_NAME")
 
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		http.Error(w, "error getting the files", http.StatusInternalServerError)
+	output := listFiles(bucketName, directoryId)
+
+	if len(output.Contents) == 0 {
+		http.Error(w, "no files found", http.StatusNotFound)
 		return
 	}
 
-	for _, entry := range entries {
-		fileName := entry.Name()
-		newFilePath := fp.Join(dir, fileName)
-		file, err := os.Open(newFilePath)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("error opening file %s: %v", newFilePath, err), http.StatusInternalServerError)
-			return
-		}
+	for _, entry := range output.Contents {
+		fileName := *entry.Key
 
 		part, err := writer.CreateFormFile("files", fileName)
 		if err != nil {
-			file.Close()
 			http.Error(w, fmt.Sprintf("error creating form file for %s: %v", fileName, err), http.StatusInternalServerError)
 			return
 		}
 
-		_, err = io.Copy(part, file)
-		file.Close()
+		obj, err := awsClient.GetObject(context.TODO(), &s3.GetObjectInput{
+			Bucket: &bucketName,
+			Key:    entry.Key,
+		})
+
+		if err != nil {
+			http.Error(w, fmt.Sprintf("error getting object %s: %v", fileName, err), http.StatusInternalServerError)
+			return
+		}
+
+		_, err = io.Copy(part, obj.Body)
+
 		if err != nil {
 			http.Error(w, fmt.Sprintf("error copying file %s: %v", fileName, err), http.StatusInternalServerError)
 			return
@@ -129,6 +131,18 @@ func Pull(w http.ResponseWriter, r *http.Request) {
 
 func generateRandomID() string {
 	id := strings.ToLower(uuid.New().String())
-
 	return strings.Split(id, "-")[0]
+}
+
+func listFiles(bucketName string, folderName string) *s3.ListObjectsV2Output {
+	output, err := awsClient.ListObjectsV2(context.TODO(), &s3.ListObjectsV2Input{
+		Bucket: &bucketName,
+		Prefix: aws3.String(folderName + "/"),
+	})
+	if err != nil {
+		log.Printf("error listing objects in folder %s: %v", folderName, err)
+		return nil
+	}
+
+	return output
 }
