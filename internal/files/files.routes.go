@@ -51,7 +51,6 @@ func Push(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Fatal(err)
 		}
-		link := "http://localhost:8080/pull/" + folderName
 		go func() {
 			time.Sleep(5 * time.Minute)
 
@@ -79,7 +78,7 @@ func Push(w http.ResponseWriter, r *http.Request) {
 				log.Printf("error deleting folder %s: %v", folderName, err)
 			}
 		}()
-		fmt.Fprintf(w, "files uploaded successfully: get them with this link: %s\n", link)
+		fmt.Fprintf(w, "files uploaded successfully: \nGet them with this directory code: %s\n", folderName)
 	}
 
 }
