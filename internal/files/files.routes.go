@@ -9,12 +9,10 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	aws3 "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/google/uuid"
 	"github.com/sebasromero/tfs-api/internal/aws"
 )
 
@@ -36,13 +34,14 @@ func Push(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, fileHeader := range files {
-		file, err := fileHeader.Open()
+		encryptedFile := encryptFile(fileHeader)
+		file, err := os.Open(encryptedFile)
 		if err != nil {
 			http.Error(w, "unable to open uploaded file", http.StatusInternalServerError)
 			return
 		}
 		defer file.Close()
-
+		defer os.Remove(encryptedFile)
 		_, err = awsClient.PutObject(context.TODO(), &s3.PutObjectInput{
 			Bucket: aws3.String(bucketName),
 			Body:   file,
@@ -107,7 +106,7 @@ func Pull(w http.ResponseWriter, r *http.Request) {
 
 		obj, err := awsClient.GetObject(context.TODO(), &s3.GetObjectInput{
 			Bucket: &bucketName,
-			Key:    entry.Key,
+			Key:    &fileName,
 		})
 
 		if err != nil {
@@ -115,7 +114,16 @@ func Pull(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		_, err = io.Copy(part, obj.Body)
+		fileDecrypted := decryptFile(obj, fileName, directoryId)
+		openedFile, err := os.Open(fileDecrypted)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("error opening file %s: %v", fileName, err), http.StatusInternalServerError)
+			return
+		}
+		defer os.Remove(uploadsDir + directoryId)
+		defer os.Remove(fileDecrypted)
+		defer openedFile.Close()
+		_, err = io.Copy(part, openedFile)
 
 		if err != nil {
 			http.Error(w, fmt.Sprintf("error copying file %s: %v", fileName, err), http.StatusInternalServerError)
@@ -126,22 +134,4 @@ func Pull(w http.ResponseWriter, r *http.Request) {
 	writer.Close()
 	w.Header().Set("Content-Type", writer.FormDataContentType())
 	w.Write(body.Bytes())
-}
-
-func generateRandomID() string {
-	id := strings.ToLower(uuid.New().String())
-	return strings.Split(id, "-")[0]
-}
-
-func listFiles(bucketName string, folderName string) *s3.ListObjectsV2Output {
-	output, err := awsClient.ListObjectsV2(context.TODO(), &s3.ListObjectsV2Input{
-		Bucket: &bucketName,
-		Prefix: aws3.String(folderName + "/"),
-	})
-	if err != nil {
-		log.Printf("error listing objects in folder %s: %v", folderName, err)
-		return nil
-	}
-
-	return output
 }
